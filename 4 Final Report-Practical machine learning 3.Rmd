@@ -1,0 +1,260 @@
+---
+title: 'Practical machine learning: prediction of the type of exercise.'
+author: "Jordi Figueras"
+date: "21 agost de 2018"
+output: html_document
+---
+### EXECUTIVE SUMMARY
+
+Goal of this project is to obtain a model that allows to predict how did a group of participants a weight lifting exercise In this project, the goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants.
+
+To do so, different models have been considered, obtaining a random forest model as a best model, and validated with a testing set. Variations of this model with the data of a subgroup of participants have been considered to investigate the out of sample error.
+
+### INTRODUCTION
+The goal of this project is to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants to predict the way in which they performed a weight lifting exercise. As stated in the description of this project:
+
+*They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. More information is available from the website here: [link](http://web.archive.org/web/20161224072740/http:/groupware.les.inf.puc-rio.br/har) (see the section on the Weight Lifting Exercise Dataset).*
+
+The dataset contains (for each participant) 10 repetitions of the exercise in 5 different  fashions: A, according to specifications and B,C,D and E, with different common mistakes. 
+
+This project pretends to find a model and validate it, study the and use it for the quiz test. This document shows how I built the model, using cross validation, my thoughts on expected out of sample error, and the reasoning for the choices made. Also, the use of the model to predict the answers for the quiz.
+
+### DATA PREPARATION and PRELIMINARY ANALYSIS
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE,eval=TRUE,cache=TRUE,results = "hide")
+library(caret)
+library(plotly)
+library(kernlab)
+library(dplyr)
+library(gridExtra)
+path<-"C:/Users/jfp/Documents/coursera/8.Practical Machine Learning"
+training_complete<-read.csv(paste0(path,"/pml-training.csv"),stringsAsFactors = FALSE)
+quiz<-read.csv(paste0(path,"/pml-testing.csv"),stringsAsFactors = FALSE)
+```
+
+```{r data prep}
+training_complete$classe<-as.factor(training_complete$classe)
+training_complete$user_name<-as.factor(training_complete$user_name)
+training_reduced<-training_complete[,colSums(is.na(training_complete))<10000]%>%
+      select(-X)
+
+char<-unlist(lapply(training_reduced,is.character))
+training_reduced<-training_reduced[,char==FALSE]
+
+InTrain<-createDataPartition(y=training_reduced$classe,p=0.75,list=FALSE)
+training<-training_reduced[InTrain,]
+testing<-training_reduced[-InTrain,]
+#training[,57] <- as.numeric(training[,57])
+```
+In this first section, the data has been loaded from the original csv files,both for training training and for the quiz. Original training data has `r dim(training_complete)[1]` observations for `r dim(training_complete)[2]` variables. However, it can be observed that a large number of variables has a lot of missing data. These variables have been removed from the analysis. 
+
+To enable cross-validation of the model developed, the dtaset has been divided into a `r dim(training)[1]`x`r dim(training)[2]` training set,containing 75% of the observations and a `r dim(testing)[1]`x`r dim(testing)[2]` testing set containing a 25%.
+
+```{r preliminary}
+# Determine variables strongly correlated (>0.9 and remove them to simplify the model)
+# Obtains a minimal training set 
+M <- abs(cor(training[,-c(1,57)]))
+
+diag(M) <- 0
+
+# corr.map <- plot_ly(z = M, type = "heatmap")
+
+# same without plot_ly
+M1 <- as.data.frame(M)%>%
+    mutate(time=row.names(M))
+
+corr.df <- data.frame(Variable1= M1$time,stack(M1,select=-time))
+
+corr.map2 <- ggplot(corr.df, aes(Variable1, ind)) +
+    geom_tile(aes(fill = values),colour = "white") + scale_fill_gradient(low = "white",high = "steelblue")+
+    theme(axis.text.x = element_text(angle=90))
+
+corr.var <- which(M > 0.9,arr.ind = TRUE)
+
+cols <- c(35,37,50,22,23,5,8,13,14,6,12)
+
+training_minimal <- training[,-cols[c(1,2,4,6,7,8,10)]]
+InTrainMin <- createDataPartition(y=training_reduced$classe,p=0.15,list=FALSE)
+
+training_minimal <- training_reduced[InTrainMin,-cols[c(1,2,4,6,7,8,10)]]
+```
+
+
+To get a better insight on the data, and detect correlated variables, the correlation between all variables has been calculated. A "heatmap" of the correlation of the variables is shown in the next figure. 
+
+```{r heatmap,eval=TRUE,fig.cap="correlation of the different variables"}
+corr.map2
+```
+
+The variables with correlation (> 0.9) with other variables are the following:
+`r unique(row.names(corr.var))`. A simplified training dataset has been obtained by deleting from the training dataset correlated variables and with a smaller number of observations. This simplified training set has been used for preliminary analysis of possible models, for time-saving purposes. 
+
+The final model, though, has used the original (`r dim(training)[1]`x`r dim(training)[2]`) training data set. 
+
+
+### MODEL PREPARATION
+
+First a tree model has been considered, using all of the variables for the training dataset. However, shows a bad accuracy, even within the training set:
+
+```{r models.rpart,echo=TRUE}
+mod_rpart<-train(classe~.,method="rpart",data=training)
+pred_rpart<-predict(mod_rpart,training)
+cm_rpart <- confusionMatrix(training$classe,pred_rpart)
+plot_rpart <- ggplot()+geom_jitter(aes(training$classe,pred_rpart))
+```
+
+Accuracy of the model: `r cm_rpart$overall[1]` 
+
+The confusion matrix for the training dataset is shown here.
+```{r rpart3}
+grid.table(cm_rpart$table)
+```
+
+Thus, tree model has been discarded as a suitable model to predict the kind of exercise performed.
+
+As a next step, random forest models have been considered. For the preliminary analysis, 2 models have been considered: the first one with the minimal dataset defined previously, and the second one, with the 4 first variables (`r colnames(training_minimal)[1:4]`) removed from the data set, to check if there is any influence from them in the model.
+
+```{r models.rf,echo=TRUE}
+mod_rf0 <- train (classe~.,method="rf",data=training_minimal)
+cm_rf0 <- confusionMatrix(training_minimal$classe,predict(mod_rf0,training_minimal))
+plot_rf0 <- ggplot(testing)+geom_jitter(aes(training_minimal$classe,predict(mod_rf0,training_minimal),color=user_name))
+
+training_minimal2 <- training_minimal[,-c(1,2,3,4)]
+mod_rf.simple <- train (classe~.,method="rf",data=training_minimal2)
+cm_rf.simple <- confusionMatrix(training_minimal2$classe,predict(mod_rf.simple,training_minimal2))
+
+mod_rf.final <- train (classe~.,method="rf",data=training)
+cm_rf_training.final <- confusionMatrix(training$classe,predict(mod_rf.final,training))
+cm_rf_testing.final <- confusionMatrix(testing$classe,predict(mod_rf.final,testing))
+plot_rf.final <- ggplot(testing)+geom_jitter(aes(testing$classe,predict(mod_rf.final,testing),color=user_name))+
+    xlab("original values for the testing set")+
+    ylab("predicted values for the testing set")
+
+```
+
+The accuracy for these two models is very similar: `r cm_rf0$overall[1]` using all variables of the simplified dataset and `r cm_rf.simple$overall[1]` were 4 variables have been removed.
+As it can be seen, a very good accuracy (within the training dataset) has been obtained in both cases.
+
+
+```{r model,fig.cap="confusion matrix for the 2nd random forest model model",results="markup"}
+grid.table(cm_rf.simple$table)
+```
+
+Seeing the good results of the random forest model from a reduced dataset, a model using the complete training set has been developed. The results for this complete model (within the training dataset) is: 
+
+```{r rfmodel2,results="markup"}
+mod_rf.final$results
+```
+
+### MODEL VALIDATION
+The model from the complete data set has been cross-validated against a testing set, randomly selected from the original data set. The confusion matrix and a plot comparing the predicted results with the original data are included.
+
+```{r validation0,results="markup",fig.cap="confusion matrix for the testing set"}
+cm_rf_testing.final
+```
+
+```{r validation,results="markup",fig.cap="Results predicted vs measured, for each user."}
+plot_rf.final
+```
+
+The accuracy of the model in the testing set is r `r cm_rf_testing.final$overall[1]` compared to that for the training set: `r cm_rf_training.final$overall[1]`
+
+
+
+```{r validation2}
+cm_rf_testing_0 <- confusionMatrix(testing$classe,predict(mod_rf0,testing))
+cm_rf_testing.simple <- confusionMatrix(testing$classe,predict(mod_rf.simple,testing))
+```
+
+For comparison, the accuracy for the models obtained with the simple dataset when applied to the testing set is the following:
+* Minimal dataset:`r cm_rf_testing_0$overall[1]` 
+* Model number2: `r cm_rf_testing.simple$overall[1]`
+
+Therefore, accuracy for the three *random forest* models applied to the testing set is very high. 
+
+## OUT of SAMPLE ERROR
+Validation of the model in the testing set has allowed to determine in sample error. However, out of sample error could be different if the conditions of the measurements performed are different than those used in the present project.
+
+There are two main reasons why out of sample error could be bigger:
+
+** Type of errors. It is feasible to consider that "on purpose errors" could be different than "unintentional errors". 
+** People performing the tests.
+
+Not much can be done with the present data set to study the first issue. For the second (person) it is worth noting that mod_rf2 do not uses the the information about the user_name (among others) and still gets similar results. A next step is to predict the type of exercise for people not used in the training set. A way to do so is with a dataset where the information for some of athletes is not used and predict the outcome.    
+
+```{r outofsample,echo=TRUE}
+training_one <- training%>%
+    filter(user_name %in% c("adelmo"))
+
+mod_rf_1 <- train (classe~.,method="rf",data=training_one)
+cm_rf_1 <- confusionMatrix(testing$classe,predict(mod_rf_1,testing))
+
+
+training_3<- training%>%
+    filter(user_name %in% c("adelmo","charles","pedro"))
+
+mod_rf_3 <- train (classe~.,method="rf",data=training_3)
+cm_rf_3 <- confusionMatrix(testing$classe,predict(mod_rf_3,testing))
+
+training_5 <- training%>%
+    filter(user_name %in% c("adelmo","carlitos","charles","eurico","pedro"))
+
+mod_rf_5 <- train (classe~.,method="rf",data=training_5)
+cm_rf5 <- confusionMatrix(testing$classe,predict(mod_rf_5,testing))
+```
+
+The following table shows, for different number of users in the training set, the overall accuracy of a model in the testing set, for the complete set, and for one particular user (Data from Jeremy is only used in the last model).
+
+```{r comparison,results="markup"}
+
+acc <- function(model,dataset,user){
+    filtered <- dataset%>%
+                filter(user_name==user)
+    cm <- confusionMatrix(filtered$classe,predict(model,filtered))
+    cm$overall[1]
+}
+
+df.outofsample <- data.frame(
+                        Users=c(1,3,5,6),
+                        Acc.Testing=c(cm_rf_1$overall[1],cm_rf_3$overall[1],cm_rf5$overall[1],cm_rf_testing.final$overall[1]),
+                        Acc.Jeremy=c(acc(mod_rf_1,testing,"jeremy"),
+acc(mod_rf_3,testing,"jeremy"),
+acc(mod_rf_5,testing,"jeremy"),
+acc(mod_rf.final,testing,"jeremy")
+)
+                        )
+
+#df.2 <- mod_rf_1$overall[1]
+
+grid.table(df.outofsample)    
+
+
+```
+
+
+As can be observed, accuracy of the model drops significantly if data for the user is not used in the training. It is thus expected that out of sample error could be significantly higher than in sample error.
+
+Potentially, this out of sample error could be reduced by three means:
+
+** Reduce the number of variables used for the training to reduce overfitting,
+** Increase the number of users whose data is used for the training set.
+** Include a small data set in the training set for new users, in order to predict properly the type of exercises that they have performed.
+
+
+### QUIZ
+
+Finally, the model selected has been used to predict the values for the quiz. Both the simplified model and the complete model have been used, obtaining the same results, suggesting that the simplified model is also accurate for out of sample results. 
+
+Predicted results have been introduced to the coursera site obtaining a 20/20 as a result.
+```{r quiz, echo=TRUE, results="hide"}
+predict(mod_rf.final,quiz)
+```
+
+
+### CONCLUSIONS
+
+In this report, a random forest model has been built from a data set for weight lifting exercises performed in 5 different ways, monitored with sensors, for 6 different users. This model predicts the way in which a a training exercise has been performed. The model has been validated with a test set. 
+The model has been modified by removing data for several of the users to understand the out of sample error for this model. It suggests that out of sample error is bigger than in sample error and possible ways to reduce it have been proposed.
+The model has been used to obtain the answer of the quiz.
+
